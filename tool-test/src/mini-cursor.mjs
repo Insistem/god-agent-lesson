@@ -1,0 +1,110 @@
+import 'dotenv/config'
+import { ChatOpenAI } from '@langchain/openai'
+import { HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages'     
+import { executeCommandTool, listDirTool, readFileTool, writeFileTool } from'./all-tools.mjs';
+import chalk from 'chalk'
+
+const model = new ChatOpenAI({
+    modelName: 'qwen-plus',
+    apiKey: process.env.OPENAI_API_KEY,
+    temperature: 0,
+    configuration: {
+        baseURL: process.env.OPENAI_API_URL
+    }
+})
+
+const tools = [
+    executeCommandTool,
+    listDirTool,
+    readFileTool,
+    writeFileTool
+]
+
+const modelWithTools = model.bindTools(tools)
+
+// Agent执行‘
+async function runAgentWithTools(query, maxIterations = 30) {
+    const messages= [
+        new SystemMessage(`你是一个项目管理助手，你必须通过调用工具来完成所有任务。
+            当前工作目录：${process.cwd()}
+            
+            工具列表：
+            1. execute_command: 执行命令(command必填, workingDir选填)
+            2. read_file: 读取文件(filePath必填)
+            3. write_file: 写入文件(filePath和content必填)
+            4. list_directory: 列出目录(dirPath选填)
+            
+            ⚠️ 核心规则 - 必须遵守：
+            - 你只能通过调用工具来完成任务，不要输出文字描述任务而不调用工具
+            - 每次回复最多调用1个工具，每次只做一件事
+            - 只有所有任务都100%完成后，才能不调用工具直接回复"全部完成"
+            - 如果还有任务没做，必须继续调用工具
+            
+            execute_command 规则：
+            - 用 workingDir 指定工作目录，不要在 command 里用 cd
+            - 正确：{command: "pnpm install", workingDir: "react-todo-app"}
+            - 错误：{command: "cd react-todo-app && pnpm install"}
+
+            每轮只做一件事，做完继续下一件事。
+            `),
+            new HumanMessage(query)
+    ]
+    // 这里是for await组合，前一个执行完才会进入下一个循环
+    for (let i = 0; i < maxIterations; i++) {
+        console.log(chalk.green(`⏳ 正在等待 AI 思考...`));
+        const response = await modelWithTools.invoke(messages);
+        messages.push(response);
+        // 检查是否有工具调用
+        if (!response.tool_calls || response.tool_calls.length === 0) {
+            console.log(`\n✨ AI 最终回复:\n${response.content}\n`);
+            return response.content;
+        }
+
+        // 执行工具调用
+// 这里也是for await 保证了工具调用的顺序执行
+        for (const toolCall of response.tool_calls) {
+            const foundTool = tools.find(t => t.name === toolCall.name);
+            if (foundTool) {
+                const toolResult = await foundTool.invoke(toolCall.args);
+                messages.push(new ToolMessage({
+                    content: toolResult,
+                    tool_call_id: toolCall.id,
+                }));
+            }
+        }
+    }
+
+    return messages[messages.length - 1].content;
+}
+
+
+const case1 = `
+在C:\mpy\a_coder\agent-learn\god_agent_lessons目录下创建一个功能丰富的 React TodoList 应用：
+
+1. 创建项目：echo -e "n\nn" | pnpm create vite react-todo-app --template react-ts
+2. 修改 src/App.tsx，实现完整功能的 TodoList：
+2.1 功能的逻辑
+ - 添加、删除、编辑、标记完成
+ - 分类筛选（全部/进行中/已完成）
+ - 统计信息显示
+ - localStorage 数据持久化
+2.2 添加复杂样式：
+ - 渐变背景（蓝到紫）
+ - 卡片阴影、圆角
+ - 悬停效果
+2.3 添加动画：
+ - 添加/删除时的过渡动画
+ - 使用 CSS transitions
+3. 列出目录确认
+
+注意：使用 pnpm，功能要完整，样式要美观，要有动画效果
+
+上述功能实现之后在 react-todo-app 项目中，运行如下两个命令：
+1. 使用 pnpm install 安装依赖
+2. 使用 pnpm run dev 启动服务器
+`
+try {
+    await runAgentWithTools(case1)
+} catch (error) {
+    console.error(`\n❌ 执行失败: ${error.message}`)
+}
